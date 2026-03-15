@@ -40,7 +40,8 @@ namespace RPFv7Editor
                     continue;
                 }
 
-                string keysPath = Path.Combine(Path.GetDirectoryName(Assembly.GetEntryAssembly().Location), "keys");
+                string baseDir = AppContext.BaseDirectory;
+                string keysPath = Path.Combine(baseDir, "keys");
                 if (!LoadKeys(keysPath))
                 {
                     continue;
