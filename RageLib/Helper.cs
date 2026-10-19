@@ -1,4 +1,4 @@
-﻿using System.Security.Cryptography;
+using System.Buffers.Binary;
 using v1mertool.Crypto;
 using System.Text;
 
@@ -146,7 +146,7 @@ namespace v1mertool.Helper
         protected virtual byte[] ReadFromStream(int count, bool ignoreEndianess = false)
         {
             var buffer = new byte[count];
-            baseStream.Read(buffer, 0, count);
+            baseStream.ReadExactly(buffer);
 
             if (!ignoreEndianess && (Endianess == Endianess.BigEndian))
             {
@@ -163,31 +163,51 @@ namespace v1mertool.Helper
 
         public int ReadInt32()
         {
-            return BitConverter.ToInt32(ReadFromStream(4), 0);
+            Span<byte> buffer = stackalloc byte[4];
+            baseStream.ReadExactly(buffer);
+            return Endianess == Endianess.LittleEndian
+                ? BinaryPrimitives.ReadInt32LittleEndian(buffer)
+                : BinaryPrimitives.ReadInt32BigEndian(buffer);
         }
 
         public ushort ReadUInt16()
         {
-            return BitConverter.ToUInt16(ReadFromStream(2), 0);
+            Span<byte> buffer = stackalloc byte[2];
+            baseStream.ReadExactly(buffer);
+            return Endianess == Endianess.LittleEndian
+                ? BinaryPrimitives.ReadUInt16LittleEndian(buffer)
+                : BinaryPrimitives.ReadUInt16BigEndian(buffer);
         }
 
         public uint ReadUInt32()
         {
-            return BitConverter.ToUInt32(ReadFromStream(4), 0);
+            Span<byte> buffer = stackalloc byte[4];
+            baseStream.ReadExactly(buffer);
+            return Endianess == Endianess.LittleEndian
+                ? BinaryPrimitives.ReadUInt32LittleEndian(buffer)
+                : BinaryPrimitives.ReadUInt32BigEndian(buffer);
         }
         public ulong ReadUInt64()
         {
-            return BitConverter.ToUInt64(this.ReadFromStream(8, false), 0);
+            Span<byte> buffer = stackalloc byte[8];
+            baseStream.ReadExactly(buffer);
+            return Endianess == Endianess.LittleEndian
+                ? BinaryPrimitives.ReadUInt64LittleEndian(buffer)
+                : BinaryPrimitives.ReadUInt64BigEndian(buffer);
         }
 
         public string ReadString()
         {
             var bytes = new List<byte>();
-            var temp = ReadFromStream(1)[0];
-            while (temp != 0)
+            int value;
+            while (true)
             {
-                bytes.Add(temp);
-                temp = ReadFromStream(1)[0];
+                value = baseStream.ReadByte();
+                if (value < 0)
+                    throw new EndOfStreamException("Unexpected end of stream while reading a string.");
+                if (value == 0)
+                    break;
+                bytes.Add((byte)value);
             }
 
             return Encoding.UTF8.GetString(bytes.ToArray());
@@ -246,7 +266,9 @@ namespace v1mertool.Helper
 
         public void Write(byte value)
         {
-            WriteToStream(new byte[] { value });
+            Span<byte> buffer = stackalloc byte[1];
+            buffer[0] = value;
+            baseStream.Write(buffer);
         }
 
         public void Write(byte[] value)
@@ -256,23 +278,38 @@ namespace v1mertool.Helper
 
         public void Write(int value)
         {
-            WriteToStream(BitConverter.GetBytes(value));
+            Span<byte> buffer = stackalloc byte[4];
+            if (Endianess == Endianess.LittleEndian)
+                BinaryPrimitives.WriteInt32LittleEndian(buffer, value);
+            else
+                BinaryPrimitives.WriteInt32BigEndian(buffer, value);
+            baseStream.Write(buffer);
         }
 
         public void Write(ushort value)
         {
-            WriteToStream(BitConverter.GetBytes(value));
+            Span<byte> buffer = stackalloc byte[2];
+            if (Endianess == Endianess.LittleEndian)
+                BinaryPrimitives.WriteUInt16LittleEndian(buffer, value);
+            else
+                BinaryPrimitives.WriteUInt16BigEndian(buffer, value);
+            baseStream.Write(buffer);
         }
 
         public void Write(uint value)
         {
-            WriteToStream(BitConverter.GetBytes(value));
+            Span<byte> buffer = stackalloc byte[4];
+            if (Endianess == Endianess.LittleEndian)
+                BinaryPrimitives.WriteUInt32LittleEndian(buffer, value);
+            else
+                BinaryPrimitives.WriteUInt32BigEndian(buffer, value);
+            baseStream.Write(buffer);
         }
 
         public void Write(string value)
         {
-            foreach (var c in value)
-                Write((byte)c);
+            var bytes = Encoding.UTF8.GetBytes(value);
+            Write(bytes);
             Write((byte)0);
         }
     }

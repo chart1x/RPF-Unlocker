@@ -1,4 +1,5 @@
-﻿using v1mertool.Crypto;
+using System.Text;
+using v1mertool.Crypto;
 using v1mertool.Helper;
 
 namespace v1mertool.Archives
@@ -22,61 +23,34 @@ namespace v1mertool.Archives
         private const int BUFFER_SIZE = 16384;
         public static long FindSpace(List<DataBlock> blocks, DataBlock item)
         {
-            blocks.Sort(
-                delegate (DataBlock a, DataBlock b)
-                {
-                    if (a.Offset != b.Offset)
-                        return a.Offset.CompareTo(b.Offset);
-                    else
-                        return a.Offset.CompareTo(b.Offset);
-                }
-            );
+            blocks.Sort((a, b) => a.Offset.CompareTo(b.Offset));
 
-            DataBlock next = null;
+            DataBlock? next = null;
             foreach (var x in blocks)
             {
-                if ((x != item) && (x.Offset >= item.Offset))
+                if (x != item && x.Offset >= item.Offset)
                 {
-                    if (next == null)
-                    {
+                    if (next == null || x.Offset < next.Offset)
                         next = x;
-                    }
-                    else
-                    {
-                        if (x.Offset < next.Offset)
-                            next = x;
-                    }
                 }
-
             }
 
-            if (next == null)
-                return long.MaxValue;
-
-            return next.Offset - item.Offset;
+            return next == null ? long.MaxValue : next.Offset - item.Offset;
         }
 
         public static long FindOffset(List<DataBlock> blocks, long neededSpace, long blockSize = 1)
         {
-            var lst = new List<DataBlock>();
-            lst.AddRange(blocks);
-
-            lst.Sort(
-                delegate (DataBlock a, DataBlock b)
-                {
-                    if (a.Offset != b.Offset)
-                        return a.Offset.CompareTo(b.Offset);
-                    else
-                        return a.Offset.CompareTo(b.Offset);
-                }
-            );
+            var lst = new List<DataBlock>(blocks);
+            lst.Sort((a, b) => a.Offset.CompareTo(b.Offset));
 
             if (lst.Count == 0)
                 return 0;
 
             for (int i = 0; i < lst.Count - 1; i++)
             {
-                lst[i].Length = Math.Min(lst[i].Length, lst[i + 1].Offset - lst[i].Offset);
+                var block = lst[i];
+                var length = Math.Min(block.Length, lst[i + 1].Offset - block.Offset);
+                lst[i] = new DataBlock(block.Offset, length, block.Tag);
             }
 
             long offset = 0;
@@ -87,7 +61,9 @@ namespace v1mertool.Archives
                     return offset;
 
                 offset = lst[i].Offset + lst[i].Length;
-                offset = (long)Math.Ceiling((double)offset / (double)blockSize) * blockSize;
+                var remainder = offset % blockSize;
+                if (remainder != 0)
+                    offset += blockSize - remainder;
             }
 
             return offset;
@@ -100,6 +76,8 @@ namespace v1mertool.Archives
             {
                 stream.Position = sourceOffset;
                 int i = stream.Read(buffer, 0, (int)Math.Min(length, BUFFER_SIZE));
+                if (i == 0)
+                    throw new EndOfStreamException("Unexpected end of stream while moving archive data.");
 
                 stream.Position = destinationOffset;
                 stream.Write(buffer, 0, i);
@@ -180,7 +158,6 @@ namespace v1mertool.Archives
 
             uint header_entriesCount = reader.ReadUInt32();
             uint rawNamesLength = reader.ReadUInt32();
-            bool isXCompressed = (rawNamesLength & 0x80000000) != 0;
             uint header_namesLength = rawNamesLength & 0x0FFFFFFF;
             uint header_encryption = reader.ReadUInt32();
 
@@ -295,7 +272,7 @@ namespace v1mertool.Archives
                     if (!dictionary.ContainsKey(rageArchiveDirectory2.Name))
                     {
                         dictionary.Add(rageArchiveDirectory2.Name, (uint)num);
-                        num += rageArchiveDirectory2.Name.Length + 1;
+                        num += Encoding.UTF8.GetByteCount(rageArchiveDirectory2.Name) + 1;
                     }
                     rageArchiveDirectory2.NameOffset = dictionary[rageArchiveDirectory2.Name];
                     list2.Add(rageArchiveDirectory2);
@@ -305,7 +282,7 @@ namespace v1mertool.Archives
                     if (!dictionary.ContainsKey(rageArchiveEntry.Name))
                     {
                         dictionary.Add(rageArchiveEntry.Name, (uint)num);
-                        num += rageArchiveEntry.Name.Length + 1;
+                        num += Encoding.UTF8.GetByteCount(rageArchiveEntry.Name) + 1;
                     }
                     rageArchiveEntry.NameOffset = dictionary[rageArchiveEntry.Name];
                     list2.Add(rageArchiveEntry);
@@ -394,7 +371,7 @@ namespace v1mertool.Archives
         }
         public void Dispose()
         {
-            if (this.BaseStream != null)
+            if (this.BaseStream != null && !this.LeaveOpen)
             {
                 this.BaseStream.Dispose();
             }
@@ -458,12 +435,7 @@ namespace v1mertool.Archives
             };
             writer.Write(value2);
             writer.Write(this.FileUncompressedSize);
-            if (this.IsEncrypted)
-            {
-                writer.Write(13U);
-                return;
-            }
-            writer.Write(0U);
+            writer.Write(this.IsEncrypted ? 1U : 0U);
         }
     }
 
@@ -593,6 +565,36 @@ namespace v1mertool.Archives
 
         }
 
+        public void AddTextFile(string name, string content)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+                throw new ArgumentException("Archive file name cannot be empty.", nameof(name));
+
+            var data = Encoding.UTF8.GetBytes(content);
+            for (int i = archive_.Root.Files.Count - 1; i >= 0; i--)
+            {
+                if (string.Equals(archive_.Root.Files[i].Name, name, StringComparison.Ordinal))
+                    archive_.Root.Files.RemoveAt(i);
+            }
+
+            long offset = Math.Max(archive_.BaseStream.Length, GetHeaderSize());
+            long remainder = offset % BLOCK_SIZE;
+            if (remainder != 0)
+                offset += BLOCK_SIZE - remainder;
+
+            archive_.BaseStream.Position = offset;
+            archive_.BaseStream.Write(data);
+
+            archive_.Root.Files.Add(new RageArchiveBinaryFile7
+            {
+                Name = name,
+                FileOffset = checked((uint)(offset / BLOCK_SIZE)),
+                FileSize = 0,
+                FileUncompressedSize = checked((uint)data.Length),
+                Flags = 0
+            });
+        }
+
         public void Dispose()
         {
             if (archive_ != null)
@@ -604,24 +606,32 @@ namespace v1mertool.Archives
 
         private long GetHeaderSize()
         {
-            long len = 16;
-
+            long entryCount = 1;
+            long namesLength = 1;
+            var names = new HashSet<string>(StringComparer.Ordinal);
             var st = new Stack<RageArchiveDirectory7>();
             st.Push(archive_.Root);
             while (st.Count > 0)
             {
                 var x = st.Pop();
-                len += 16;
-                len += x.Name.Length + 1;
 
                 foreach (var q in x.Directories)
+                {
+                    entryCount++;
+                    if (names.Add(q.Name))
+                        namesLength += Encoding.UTF8.GetByteCount(q.Name) + 1;
                     st.Push(q);
+                }
                 foreach (var q in x.Files)
-                    len += 16 + q.Name.Length + 1;
+                {
+                    entryCount++;
+                    if (names.Add(q.Name))
+                        namesLength += Encoding.UTF8.GetByteCount(q.Name) + 1;
+                }
             }
 
-
-            return len;
+            namesLength += 16 - namesLength % 16;
+            return 16 + entryCount * 16 + namesLength;
         }
 
 

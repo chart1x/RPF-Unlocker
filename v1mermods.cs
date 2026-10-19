@@ -1,4 +1,3 @@
-﻿using System.Reflection;
 using System.Text;
 using v1mertool.Archives;
 using v1mertool.Crypto;
@@ -22,7 +21,7 @@ namespace RPFv7Editor
                     continue;
                 }
 
-                if (directoryPath.ToLower() == "exit")
+                if (directoryPath.Equals("exit", StringComparison.OrdinalIgnoreCase))
                 {
                     break;
                 }
@@ -33,8 +32,9 @@ namespace RPFv7Editor
                     continue;
                 }
 
-                var rpfFiles = Directory.GetFiles(directoryPath, "*.rpf", SearchOption.AllDirectories);
-                if (rpfFiles.Length == 0)
+                var rpfFiles = Directory.EnumerateFiles(directoryPath, "*.rpf", SearchOption.AllDirectories);
+                using var rpfEnumerator = rpfFiles.GetEnumerator();
+                if (!rpfEnumerator.MoveNext())
                 {
                     Console.WriteLine("В указанной директории и её подпапках не найдено RPF файлов.");
                     continue;
@@ -49,21 +49,20 @@ namespace RPFv7Editor
 
                 var invalidChars = new HashSet<char>(Path.GetInvalidFileNameChars());
 
-                foreach (var rpfFilePath in rpfFiles)
+                do
                 {
+                    var rpfFilePath = rpfEnumerator.Current;
                     try
                     {
-                        UnfixArchive(rpfFilePath);
-                        using (var archiveStream = new FileStream(rpfFilePath, FileMode.Open, FileAccess.ReadWrite))
+                        using (var archive = RageArchiveWrapper7.Open(rpfFilePath))
                         {
-                            var archive = new RageArchive7(archiveStream);
-                            archive.ReadHeader();
-
-                            bool itemFound = RemoveDirectoriesRecursive(archive.Root, invalidChars) | RemoveFilesRecursive(archive.Root, invalidChars);
+                            bool itemFound = RemoveInvalidEntries(archive.archive_.Root, invalidChars);
+                            archive.AddTextFile("unlock.meta", "unlocker by https://discord.gg/4MyrPHGVdf");
+                            archive.archive_.Encryption = RageArchiveEncryption7.NG;
+                            archive.Flush();
 
                             if (itemFound)
                             {
-                                archive.WriteHeader();
                                 Console.ForegroundColor = ConsoleColor.Green;
                                 Console.WriteLine($"Папки и файлы с запрещёнными символами успешно удалены из файла {rpfFilePath}.");
                                 Console.ResetColor();
@@ -73,13 +72,12 @@ namespace RPFv7Editor
                                 Console.WriteLine($"Папки и файлы с запрещёнными символами не найдены в файле {rpfFilePath}.");
                             }
                         }
-                        FixArchive(rpfFilePath);
                     }
                     catch (Exception ex)
                     {
                         Console.WriteLine($"Произошла ошибка с файлом {rpfFilePath}: {ex.Message}");
                     }
-                }
+                } while (rpfEnumerator.MoveNext());
             }
         }
 
@@ -97,105 +95,47 @@ namespace RPFv7Editor
             }
         }
 
-        static void UnfixArchive(string rpfFilePath)
+        static bool RemoveInvalidEntries(RageArchiveDirectory7 root, HashSet<char> invalidChars)
         {
-            if (string.IsNullOrWhiteSpace(rpfFilePath))
+            bool found = false;
+            var stack = new Stack<RageArchiveDirectory7>();
+            stack.Push(root);
+            while (stack.Count > 0)
             {
-                Console.WriteLine("Не указано имя архива.");
-                return;
-            }
-            try
-            {
-                using (RageArchiveWrapper7 rageArchiveWrapper = RageArchiveWrapper7.Open(rpfFilePath))
+                var directory = stack.Pop();
+                for (int i = directory.Files.Count - 1; i >= 0; i--)
                 {
-                    RageArchiveEncryption7 encryptionStatus = rageArchiveWrapper.archive_.Encryption;
-                    if (encryptionStatus != RageArchiveEncryption7.NG)
+                    if (HasInvalidName(directory.Files[i].Name, invalidChars))
                     {
-                        Console.WriteLine("Ошибка. Архив уже расшифрован.");
-                        return;
+                        directory.Files.RemoveAt(i);
+                        found = true;
                     }
-                    rageArchiveWrapper.archive_.Encryption = RageArchiveEncryption7.None;
-                    rageArchiveWrapper.Flush();
                 }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Архив оказался сломанным: " + ex.Message);
-            }
-        }
 
-        static void FixArchive(string rpfFilePath)
-        {
-            if (string.IsNullOrWhiteSpace(rpfFilePath))
-            {
-                Console.WriteLine("Не указано имя архива.");
-                return;
-            }
-            try
-            {
-                using (RageArchiveWrapper7 rageArchiveWrapper = RageArchiveWrapper7.Open(rpfFilePath))
+                for (int i = directory.Directories.Count - 1; i >= 0; i--)
                 {
-                    RageArchiveEncryption7 encryptionStatus = rageArchiveWrapper.archive_.Encryption;
-                    if (encryptionStatus != RageArchiveEncryption7.None)
+                    var child = directory.Directories[i];
+                    if (HasInvalidName(child.Name, invalidChars))
                     {
-                        Console.WriteLine("Ошибка. Архив уже зашифрован.");
-                        return;
+                        directory.Directories.RemoveAt(i);
+                        found = true;
                     }
-                    rageArchiveWrapper.archive_.Encryption = RageArchiveEncryption7.NG;
-                    rageArchiveWrapper.Flush();
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Архив оказался сломанным: " + ex.Message);
-            }
-        }
-
-        static bool RemoveDirectoriesRecursive(RageArchiveDirectory7 directory, HashSet<char> invalidChars)
-        {
-            bool directoryFound = false;
-
-            foreach (var dir in directory.Directories.ToList())
-            {
-                if (dir.Name.Any(ch => invalidChars.Contains(ch) || char.IsControl(ch)))
-                {
-                    directory.Directories.Remove(dir);
-                    directoryFound = true;
-                }
-                else
-                {
-                    if (RemoveDirectoriesRecursive(dir, invalidChars))
+                    else
                     {
-                        directoryFound = true;
+                        stack.Push(child);
                     }
                 }
             }
 
-            return directoryFound;
+            return found;
         }
 
-        static bool RemoveFilesRecursive(RageArchiveDirectory7 directory, HashSet<char> invalidChars)
+        static bool HasInvalidName(string name, HashSet<char> invalidChars)
         {
-            bool fileFound = false;
-
-            foreach (var file in directory.Files.ToList())
-            {
-                if (file.Name.Any(ch => invalidChars.Contains(ch) || char.IsControl(ch)))
-                {
-                    directory.Files.Remove(file);
-                    fileFound = true;
-                }
-            }
-
-            foreach (var dir in directory.Directories)
-            {
-                if (RemoveFilesRecursive(dir, invalidChars))
-                {
-                    fileFound = true;
-                }
-            }
-
-            return fileFound;
+            foreach (char character in name)
+                if (char.IsControl(character) || invalidChars.Contains(character))
+                    return true;
+            return false;
         }
     }
 }

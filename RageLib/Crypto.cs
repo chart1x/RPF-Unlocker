@@ -1,4 +1,5 @@
-﻿using v1mertool.Helper;
+using System.Buffers.Binary;
+using v1mertool.Helper;
 
 namespace v1mertool.Crypto
 {
@@ -43,21 +44,21 @@ namespace v1mertool.Crypto
 
         public static byte[] Decrypt(byte[] data, byte[] key)
         {
-            byte[] array = new byte[data.Length];
-            uint[] array2 = new uint[key.Length / 4];
-            Buffer.BlockCopy(key, 0, array2, 0, key.Length);
-            for (int i = 0; i < data.Length / 16; i++)
+            var output = new byte[data.Length];
+            var roundKeys = CreateRoundKeys(key);
+            Span<byte> state = stackalloc byte[16];
+            Span<byte> next = stackalloc byte[16];
+            int blockCount = data.Length / 16;
+            for (int i = 0; i < blockCount; i++)
             {
-                byte[] array3 = new byte[16];
-                Array.Copy(data, 16 * i, array3, 0, 16);
-                Array.Copy(GTA5Crypto.DecryptBlock(array3, array2), 0, array, 16 * i, 16);
+                DecryptBlock(data.AsSpan(i * 16, 16), output.AsSpan(i * 16, 16), roundKeys, state, next);
             }
-            if (data.Length % 16 != 0)
+            int remainder = data.Length % 16;
+            if (remainder != 0)
             {
-                int num = data.Length % 16;
-                Buffer.BlockCopy(data, data.Length - num, array, data.Length - num, num);
+                data.AsSpan(data.Length - remainder).CopyTo(output.AsSpan(data.Length - remainder));
             }
-            return array;
+            return output;
         }
 
         public static byte[] DecryptBlock(byte[] data, uint[] key)
@@ -94,6 +95,140 @@ namespace v1mertool.Crypto
             return array;
         }
 
+        private static uint[] CreateRoundKeys(byte[] key)
+        {
+            var roundKeys = new uint[key.Length / 4];
+            Buffer.BlockCopy(key, 0, roundKeys, 0, key.Length);
+            return roundKeys;
+        }
+
+        private static void DecryptBlock(
+            ReadOnlySpan<byte> data,
+            Span<byte> output,
+            ReadOnlySpan<uint> key,
+            Span<byte> state,
+            Span<byte> next)
+        {
+            Span<byte> temp;
+            data.CopyTo(state);
+            DecryptRoundA(state, next, key, GTA5Constants.PC_NG_DECRYPT_TABLES[0], 0);
+            temp = state; state = next; next = temp;
+            DecryptRoundA(state, next, key, GTA5Constants.PC_NG_DECRYPT_TABLES[1], 4);
+            temp = state; state = next; next = temp;
+            for (int round = 2; round <= 15; round++)
+            {
+                DecryptRoundB(state, next, key, GTA5Constants.PC_NG_DECRYPT_TABLES[round], round * 4);
+                temp = state; state = next; next = temp;
+            }
+            DecryptRoundA(state, output, key, GTA5Constants.PC_NG_DECRYPT_TABLES[16], 64);
+        }
+
+        private static void DecryptRoundA(
+            ReadOnlySpan<byte> data,
+            Span<byte> output,
+            ReadOnlySpan<uint> key,
+            uint[][] table,
+            int keyOffset)
+        {
+            WriteUInt32(output, 0, table[0][data[0]] ^ table[1][data[1]] ^ table[2][data[2]] ^ table[3][data[3]] ^ key[keyOffset]);
+            WriteUInt32(output, 4, table[4][data[4]] ^ table[5][data[5]] ^ table[6][data[6]] ^ table[7][data[7]] ^ key[keyOffset + 1]);
+            WriteUInt32(output, 8, table[8][data[8]] ^ table[9][data[9]] ^ table[10][data[10]] ^ table[11][data[11]] ^ key[keyOffset + 2]);
+            WriteUInt32(output, 12, table[12][data[12]] ^ table[13][data[13]] ^ table[14][data[14]] ^ table[15][data[15]] ^ key[keyOffset + 3]);
+        }
+
+        private static void DecryptRoundB(
+            ReadOnlySpan<byte> data,
+            Span<byte> output,
+            ReadOnlySpan<uint> key,
+            uint[][] table,
+            int keyOffset)
+        {
+            WriteUInt32(output, 0, table[0][data[0]] ^ table[7][data[7]] ^ table[10][data[10]] ^ table[13][data[13]] ^ key[keyOffset]);
+            WriteUInt32(output, 4, table[1][data[1]] ^ table[4][data[4]] ^ table[11][data[11]] ^ table[14][data[14]] ^ key[keyOffset + 1]);
+            WriteUInt32(output, 8, table[2][data[2]] ^ table[5][data[5]] ^ table[8][data[8]] ^ table[15][data[15]] ^ key[keyOffset + 2]);
+            WriteUInt32(output, 12, table[3][data[3]] ^ table[6][data[6]] ^ table[9][data[9]] ^ table[12][data[12]] ^ key[keyOffset + 3]);
+        }
+
+        private static void EncryptBlock(
+            ReadOnlySpan<byte> data,
+            Span<byte> output,
+            ReadOnlySpan<uint> key,
+            Span<byte> state,
+            Span<byte> next)
+        {
+            Span<byte> temp;
+            data.CopyTo(state);
+            EncryptRoundA(state, next, key, GTA5Constants.PC_NG_ENCRYPT_TABLES[16], 64);
+            temp = state; state = next; next = temp;
+            for (int round = 15; round >= 2; round--)
+            {
+                EncryptRoundB(state, next, key, GTA5Constants.PC_NG_ENCRYPT_LUTs[round], round * 4);
+                temp = state; state = next; next = temp;
+            }
+            EncryptRoundA(state, next, key, GTA5Constants.PC_NG_ENCRYPT_TABLES[1], 4);
+            temp = state; state = next; next = temp;
+            EncryptRoundA(state, output, key, GTA5Constants.PC_NG_ENCRYPT_TABLES[0], 0);
+        }
+
+        private static void EncryptRoundA(
+            ReadOnlySpan<byte> data,
+            Span<byte> output,
+            ReadOnlySpan<uint> key,
+            uint[][] table,
+            int keyOffset)
+        {
+            Span<byte> transformed = stackalloc byte[16];
+            data.CopyTo(transformed);
+            XorKey(transformed, key, keyOffset);
+            WriteUInt32(output, 0, table[0][transformed[0]] ^ table[1][transformed[1]] ^ table[2][transformed[2]] ^ table[3][transformed[3]]);
+            WriteUInt32(output, 4, table[4][transformed[4]] ^ table[5][transformed[5]] ^ table[6][transformed[6]] ^ table[7][transformed[7]]);
+            WriteUInt32(output, 8, table[8][transformed[8]] ^ table[9][transformed[9]] ^ table[10][transformed[10]] ^ table[11][transformed[11]]);
+            WriteUInt32(output, 12, table[12][transformed[12]] ^ table[13][transformed[13]] ^ table[14][transformed[14]] ^ table[15][transformed[15]]);
+        }
+
+        private static void EncryptRoundB(
+            ReadOnlySpan<byte> data,
+            Span<byte> output,
+            ReadOnlySpan<uint> key,
+            GTA5NGLUT[] lut,
+            int keyOffset)
+        {
+            Span<byte> transformed = stackalloc byte[16];
+            data.CopyTo(transformed);
+            XorKey(transformed, key, keyOffset);
+            uint block0 = BinaryPrimitives.ReadUInt32LittleEndian(transformed);
+            uint block1 = BinaryPrimitives.ReadUInt32LittleEndian(transformed[4..]);
+            uint block2 = BinaryPrimitives.ReadUInt32LittleEndian(transformed[8..]);
+            uint block3 = BinaryPrimitives.ReadUInt32LittleEndian(transformed[12..]);
+            output[0] = lut[0].LookUp(block0);
+            output[1] = lut[1].LookUp(block1);
+            output[2] = lut[2].LookUp(block2);
+            output[3] = lut[3].LookUp(block3);
+            output[4] = lut[4].LookUp(block1);
+            output[5] = lut[5].LookUp(block2);
+            output[6] = lut[6].LookUp(block3);
+            output[7] = lut[7].LookUp(block0);
+            output[8] = lut[8].LookUp(block2);
+            output[9] = lut[9].LookUp(block3);
+            output[10] = lut[10].LookUp(block0);
+            output[11] = lut[11].LookUp(block1);
+            output[12] = lut[12].LookUp(block3);
+            output[13] = lut[13].LookUp(block0);
+            output[14] = lut[14].LookUp(block1);
+            output[15] = lut[15].LookUp(block2);
+        }
+
+        private static void XorKey(Span<byte> data, ReadOnlySpan<uint> key, int keyOffset)
+        {
+            for (int i = 0; i < 16; i++)
+                data[i] ^= (byte)(key[keyOffset + i / 4] >> (8 * (i % 4)));
+        }
+
+        private static void WriteUInt32(Span<byte> output, int offset, uint value)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(output[offset..], value);
+        }
+
         public static byte[] DecryptRoundB(byte[] data, uint[] key, uint[][] table)
         {
             uint num = table[0][(int)data[0]] ^ table[7][(int)data[7]] ^ table[10][(int)data[10]] ^ table[13][(int)data[13]] ^ key[0];
@@ -128,21 +263,21 @@ namespace v1mertool.Crypto
 
         public static byte[] Encrypt(byte[] data, byte[] key)
         {
-            byte[] array = new byte[data.Length];
-            uint[] array2 = new uint[key.Length / 4];
-            Buffer.BlockCopy(key, 0, array2, 0, key.Length);
-            for (int i = 0; i < data.Length / 16; i++)
+            var output = new byte[data.Length];
+            var roundKeys = CreateRoundKeys(key);
+            Span<byte> state = stackalloc byte[16];
+            Span<byte> next = stackalloc byte[16];
+            int blockCount = data.Length / 16;
+            for (int i = 0; i < blockCount; i++)
             {
-                byte[] array3 = new byte[16];
-                Array.Copy(data, 16 * i, array3, 0, 16);
-                Array.Copy(GTA5Crypto.EncryptBlock(array3, array2), 0, array, 16 * i, 16);
+                EncryptBlock(data.AsSpan(i * 16, 16), output.AsSpan(i * 16, 16), roundKeys, state, next);
             }
-            if (data.Length % 16 != 0)
+            int remainder = data.Length % 16;
+            if (remainder != 0)
             {
-                int num = data.Length % 16;
-                Buffer.BlockCopy(data, data.Length - num, array, data.Length - num, num);
+                data.AsSpan(data.Length - remainder).CopyTo(output.AsSpan(data.Length - remainder));
             }
-            return array;
+            return output;
         }
 
         public static byte[] EncryptBlock(byte[] data, uint[] key)
